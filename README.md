@@ -83,6 +83,7 @@ The **Duplicates** tab lists possible pairs. Move the extra copy to the trash, o
 
 - **Start reading** and **Mark read** are on every book note.
 - Each read date goes in the `read` list, so the plugin keeps rereads. For an old read, type only the year.
+- **Read again** on a book that you finished starts a new read. The year-end report counts a read as a reread when it is not the first date in the list.
 - The **Reading** tab shows the books you read now, and all books read by year, with a small chart.
 
 ## Year-end report
@@ -90,10 +91,11 @@ The **Duplicates** tab lists possible pairs. Move the extra copy to the trash, o
 **Year-end report** makes one Markdown note for a year, in `Exports/`. It contains:
 
 - A row of covers for every book you read.
-- A summary table: books read, books from your shelves, books read elsewhere, each format, and rereads.
-- Highlights: your busiest month, the author you read most, your top genre, new authors, the oldest and newest books, and special copies.
+- A summary table: books read, books from your shelves, books read elsewhere, and rereads.
+- A "Most read" table: the top format, genre, topic, author, source and decade.
+- Highlights: your busiest month, your range, new authors, the oldest and newest books, and rereads.
 - Each book by month, with its cover, format, source, genre, date and the note from your reading log.
-- A table of genres.
+- Tables by format, genre and topic.
 
 Covers use HTML `<img>` tags. They show in Obsidian, on GitHub, and in most newsletter tools.
 

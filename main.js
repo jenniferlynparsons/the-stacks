@@ -526,6 +526,7 @@ const DIMENSIONS = {
   format: { label: 'Formats', values: (b) => [b.format || 'No format'] },
   status: { label: 'Status', values: (b) => [STATUS_LABEL[b.status]] },
   year: { label: 'Year read', values: (b) => [...new Set(b.read.map(yearOf))] },
+  source: { label: 'Where from', values: (b) => (b.source ? [b.source] : []) },
 };
 
 function tally(books, dim) {
@@ -562,6 +563,7 @@ function matchesFilter(b, f) {
   if (f.special === 'edition' && !b.edition) return false;
   if (f.special === 'either' && !b.signed && !b.edition) return false;
   if (f.year && !b.read.some((d) => d.startsWith(f.year))) return false;
+  if (f.source && (b.source || '').toLowerCase() !== f.source.toLowerCase()) return false;
   if (f.query) {
     const q = foldText(f.query);
     const hay = foldText(`${b.title} ${b.author} ${b.isbn}`);
@@ -623,35 +625,49 @@ function exportYear(books, year, thoughts) {
 
   // At a glance
   const owned = read.filter((b) => b.owned).length;
-  const fmt = tally(read, 'format').filter((x) => x.value !== 'No format').sort((a, b) => b.count - a.count);
-  const rereads = read.filter((b) => b.read.some((d) => d < y));
+  // A reread is any read this year that was not the first time you read the book.
+  const rereads = read.filter((b) => b.read.some((d, i) => i > 0 && d.startsWith(y)));
   out.push('## At a glance', '', '| | |', '| --- | --- |', `| Books read | ${read.length} |`);
+  if (entries.length !== read.length) out.push(`| Reads, counting rereads | ${entries.length} |`);
   if (owned !== read.length) out.push(`| From my shelves | ${owned} |`, `| Read elsewhere | ${read.length - owned} |`);
-  for (const f of fmt) out.push(`| ${f.value} | ${f.count} |`);
   if (rereads.length) out.push(`| Rereads | ${rereads.length} |`);
   out.push('');
+
+  // Most read
+  const ranked = (dim, pool) => tally(pool || read, dim).filter((x) => !/^No /.test(x.value)).sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
+  const top = (list) => {
+    if (!list.length) return null;
+    const best = list.filter((x) => x.count === list[0].count);
+    return { name: best.map((x) => x.value).join(', '), count: list[0].count, of: list.length };
+  };
+  const decades = new Map();
+  for (const b of read) if (/^\d{4}$/.test(b.year)) { const d = `${b.year.slice(0, 3)}0s`; decades.set(d, (decades.get(d) || 0) + 1); }
+  const decadeList = [...decades].map(([value, count]) => ({ value, count })).sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
+  const formats = ranked('format'), genres = ranked('genre'), topics = ranked('topic'), authors = ranked('author');
+  const sources = tally(read.filter((b) => !b.owned && b.source), 'source').sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
+  const rows = [['Format', top(formats)], ['Genre', top(genres)], ['Topic', top(topics)], ['Author', top(authors)],
+    ['Where from', top(sources)], ['Decade published', top(decadeList)]].filter(([, t]) => t);
+  if (rows.length) {
+    out.push('## Most read', '', '| | Top | Books |', '| --- | --- | --- |',
+      ...rows.map(([label, t]) => `| ${label} | ${md(t.name)} | ${t.count} of ${read.length} |`), '');
+  }
 
   // Highlights
   const hi = [];
   const months = MONTH_NAMES.map((_, i) => entries.filter((e) => e.d.slice(5, 7) === String(i + 1).padStart(2, '0')).length);
   const peak = Math.max(...months);
   if (peak > 1) hi.push(`**Busiest month:** ${MONTH_NAMES.filter((_, i) => months[i] === peak).join(' and ')}, with ${plural(peak, 'book')}.`);
-  const authors = tally(read, 'author').sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
-  if (authors.length && authors[0].count > 1) hi.push(`**Most-read author:** ${authors[0].value}, ${plural(authors[0].count, 'book')}.`);
-  const genres = tally(read, 'genre').sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
-  if (genres.length) hi.push(`**Top genre:** ${genres[0].value} (${genres[0].count} of ${read.length}).${genres.length > 2 ? ` ${genres.length} genres in all.` : ''}`);
+  if (genres.length > 2) hi.push(`**Range:** ${genres.length} genres and ${plural(authors.length, 'author')}.`);
   const priorAuthors = new Set(books.filter((b) => b.read.some((d) => d < y)).flatMap((b) => splitAuthors(b.author).map((a) => a.toLowerCase())));
   const newAuthors = [...new Set(read.flatMap((b) => splitAuthors(b.author)))].filter((a) => !priorAuthors.has(a.toLowerCase()));
   if (priorAuthors.size && newAuthors.length) hi.push(`**New to me:** ${plural(newAuthors.length, 'author')} I hadn't logged reading before.`);
   const dated = read.filter((b) => /^\d{4}$/.test(b.year)).sort((a, b) => a.year.localeCompare(b.year));
   if (dated.length > 1) hi.push(`**Oldest and newest:** *${md(dated[0].title)}* (${dated[0].year}) and *${md(dated[dated.length - 1].title)}* (${dated[dated.length - 1].year}).`);
-  if (rereads.length) hi.push(`**Back again:** ${rereads.map((b) => `*${md(b.title)}*`).join(', ')}.`);
-  const special = read.filter((b) => b.owned && (b.signed || b.edition));
-  if (special.length) hi.push(`**Special copies read:** ${special.map((b) => `*${md(b.title)}*${b.signed ? ' (signed)' : ''}`).join(', ')}.`);
+  if (rereads.length) hi.push(`**Back again:** ${rereads.map((b) => `*${md(b.title)}*${b.read.length > 2 ? ` (${plural(b.read.length, 'read')} in all)` : ''}`).join(', ')}.`);
   const shelfTotal = books.filter((b) => b.owned).length;
   const shelfUnread = books.filter((b) => b.owned && !b.read.length && b.status !== 'read').length;
   if (shelfTotal && owned) hi.push(`**The shelves:** ${owned} read from home this year. ${fmtNum(shelfUnread)} of ${fmtNum(shelfTotal)} books on the shelves ${shelfUnread === 1 ? 'is' : 'are'} still unread.`);
-  out.push('## Highlights', '', ...hi.map((h) => `- ${h}`), '');
+  if (hi.length) out.push('## Highlights', '', ...hi.map((h) => `- ${h}`), '');
 
   out.push('## Month by month', '', '```');
   MONTH_NAMES.forEach((m, i) => out.push(`${m.slice(0, 3)}  ${barOf(months[i], peak, 24).padEnd(25)}${months[i] || ''}`));
@@ -673,8 +689,8 @@ function exportYear(books, year, thoughts) {
     out.push(...lines, '');
   }
 
-  if (genres.length > 1) {
-    out.push('## By genre', '', '| Genre | Books |', '| --- | --- |', ...genres.map((g) => `| ${g.value} | ${g.count} |`), '');
+  for (const [label, list] of [['Format', formats], ['Genre', genres], ['Topic', topics]]) {
+    if (list.length > 1) out.push(`## By ${label.toLowerCase()}`, '', `| ${label} | Books |`, '| --- | --- |', ...list.map((g) => `| ${md(g.value)} | ${g.count} |`), '');
   }
   return out.join('\n');
 }
@@ -1229,7 +1245,7 @@ class StacksView extends ItemView {
     }
     const search = c.createEl('input', { type: 'search', cls: 'stx-search', attr: { placeholder: `Find ${DIMENSIONS[this.browseDim].label.toLowerCase()}` } });
     search.value = this.browseQuery;
-    const pool = this.browseDim === 'year' ? books : books.filter((b) => b.owned);
+    const pool = this.browseDim === 'year' || this.browseDim === 'source' ? books : books.filter((b) => b.owned);
     let values = tally(pool, this.browseDim);
     if (this.browseDim === 'author') values.sort((a, b) => authorSortKey(a.value).localeCompare(authorSortKey(b.value)));
     else if (this.browseDim === 'year') values.sort((a, b) => b.value.localeCompare(a.value));
@@ -1270,6 +1286,7 @@ class StacksView extends ItemView {
     if (d === 'format') return this.setFilter(value === 'No format' ? {} : { format: value });
     if (d === 'status') return this.setFilter({ status: Object.keys(STATUS_LABEL).find((k) => STATUS_LABEL[k] === value) ?? 'any' });
     if (d === 'year') return this.setFilter({ year: value, owned: 'all' });
+    if (d === 'source') return this.setFilter({ source: value, owned: 'not' });
     if (d === 'location') {
       if (value === 'No location') return this.setFilter({ noLocation: true });
       const [room, ...rest] = value.split(' / ');
