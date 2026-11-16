@@ -1,9 +1,9 @@
 name: Release
 
+# Run this from the Actions tab: Release → Run workflow.
+# It reads the version from manifest.json and makes a release with that tag.
 on:
-  push:
-    tags:
-      - "*"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -17,7 +17,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --title "$GITHUB_REF_NAME" \
+          VERSION=$(jq -r .version manifest.json)
+          gh release create "$VERSION" \
+            --target "$GITHUB_SHA" \
+            --title "$VERSION" \
             --notes "Download main.js, manifest.json and styles.css into your vault's plugin folder. See the README for steps." \
             main.js manifest.json styles.css
