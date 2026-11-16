@@ -646,6 +646,16 @@ function rMonthCounts(dates) {
   return out;
 }
 
+/** Year-end reports cover a finished year: the default is last year, and the current year waits for January 1. */
+function lastYear() { return String(new Date().getFullYear() - 1); }
+function reportYearProblem(year) {
+  const y = String(year || '').trim();
+  if (!/^\d{4}$/.test(y)) return 'Enter a four-digit year.';
+  const now = new Date().getFullYear();
+  if (Number(y) >= now) return `The ${y} report opens on January 1, ${Number(y) + 1}, once the year is over.`;
+  return '';
+}
+
 function newReport(source, year, title) {
   return {
     schema: REPORT_SCHEMA, source, year: String(year), generated: (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; })(),
@@ -812,7 +822,7 @@ class StacksPlugin extends Plugin {
     this.addCommand({ id: 'cover-current', name: 'Find a cover for this book', checkCallback: (c) => this.withCurrentBook(c, (b) => new CoverModal(this, b).open()) });
     this.addCommand({ id: 'duplicates', name: 'Review possible duplicates', callback: () => this.activateView('duplicates') });
     this.addCommand({ id: 'export-csv', name: 'Export the library as CSV', callback: () => this.exportLibrary() });
-    this.addCommand({ id: 'export-year', name: 'Year-end report', callback: () => new PromptModal(this.app, 'Which year?', String(new Date().getFullYear()), (y) => this.exportReadingYear(y)).open() });
+    this.addCommand({ id: 'export-year', name: 'Year-end report', callback: () => new PromptModal(this.app, 'Year-end report for which year?', lastYear(), (y) => this.exportReadingYear(y)).open() });
 
     this.addSettingTab(new StacksSettingTab(this.app, this));
     this.app.workspace.onLayoutReady(() => { if (this.settings.openOnStartup) this.activateView(); });
@@ -1002,7 +1012,7 @@ class StacksPlugin extends Plugin {
   }
 
   async exportReadingYear(year) {
-    if (!/^\d{4}$/.test(String(year).trim())) { new Notice('Enter a four-digit year'); return; }
+    { const why = reportYearProblem(year); if (why) { new Notice(why); return; } }
     await this.ensureFolder(this.settings.exportsFolder);
     year = String(year).trim();
     const books = this.getBooks();
@@ -1151,7 +1161,7 @@ class StacksView extends ItemView {
     more.addEventListener('click', (evt) => {
       const m = new Menu();
       m.addItem((i) => i.setTitle('Export the library as CSV').setIcon('table').onClick(() => this.plugin.exportLibrary()));
-      m.addItem((i) => i.setTitle('Year-end report').setIcon('calendar').onClick(() => new PromptModal(this.app, 'Which year?', String(new Date().getFullYear()), (y) => this.plugin.exportReadingYear(y)).open()));
+      m.addItem((i) => i.setTitle('Year-end report').setIcon('calendar').onClick(() => new PromptModal(this.app, 'Year-end report for which year?', lastYear(), (y) => this.plugin.exportReadingYear(y)).open()));
       m.showAtMouseEvent(evt);
     });
 
@@ -1439,7 +1449,7 @@ class StacksView extends ItemView {
       entries.sort((x, y) => y.d.localeCompare(x.d));
       const head = c.createDiv({ cls: 'stx-toolbar' });
       head.createSpan({ cls: 'stx-count', text: `${entries.length} read in ${this.year}` });
-      head.createEl('button', { text: 'Year-end report' }).addEventListener('click', () => p.exportReadingYear(this.year));
+      if (!reportYearProblem(this.year)) head.createEl('button', { text: 'Year-end report' }).addEventListener('click', () => p.exportReadingYear(this.year));
       for (const { d, b } of entries) {
         const row = c.createDiv({ cls: 'stx-row' });
         renderCover(row, b, 'stx-cover-xs');
