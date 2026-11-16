@@ -1,0 +1,10 @@
+{
+  "id": "the-stacks",
+  "name": "The Stacks",
+  "version": "1.0.0",
+  "minAppVersion": "1.6.0",
+  "description": "Catalog a home library of thousands of books: fast search, browse by author, genre or topic, loose shelf locations with bulk moves, duplicate checks, imports, and reading by year.",
+  "author": "Jennifer Lyn Parsons",
+  "isDesktopOnly": false,
+  "authorUrl": "https://github.com/jenniferlynparsons"
+}
