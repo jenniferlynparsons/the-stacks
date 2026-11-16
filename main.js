@@ -582,14 +582,129 @@ function exportCsv(books) {
   return [CSV_COLS, ...rows].map((r) => r.map(q).join(',')).join('\n') + '\n';
 }
 
-const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-function md(s) { return String(s || '').replace(/([*_`[\]])/g, '\\$1'); }
-function htmlAttr(s) { return String(s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
-function coverImg(b, width) {
-  return b.cover ? `<img src="${htmlAttr(b.cover)}" alt="${htmlAttr(`Cover of ${b.title}`)}" width="${width}">` : '';
+/* --- year-in-reading report core v1 (shared by In the Margins, Brown Bag, The Stacks and Brainrot) --- */
+/*
+ * Each plugin builds a report object in the year-in-reading/1 shape, then calls
+ * renderReportMarkdown() for the note and JSON.stringify() for the .json file.
+ * The JSON is what the Year in Reading page reads.
+ *
+ * {
+ *   schema: 'year-in-reading/1',
+ *   source: { plugin, name, unit, units },          // unit: 'book' | 'fic' | 'session'
+ *   year: '2026', generated: '2026-12-31', title,
+ *   covers: [{ title, cover }],
+ *   stats: [{ label, value }],                       // "At a glance"
+ *   top: [{ label, name, count, of }],               // "Most read" (heading: topHeading)
+ *   highlights: ['markdown', ...],
+ *   months: { label, values: [12], secondary: { label, values: [12] } | null },
+ *   sections: [{ heading, items: [item] }],
+ *   tables: [{ heading, columns: [...], rows: [[...]] }],
+ * }
+ * item: { title, author, link, linkLabel, cover, date, meta: ['markdown'], fields: [{ label, text }],
+ *         checklist: [{ text, done }], quote, tags: [] }
+ */
+const REPORT_SCHEMA = 'year-in-reading/1';
+const REPORT_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+function rMd(s) { return String(s == null ? '' : s).replace(/([*_`[\]|])/g, '\\$1'); }
+function rAttr(s) { return String(s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
+function rImg(title, cover, width) {
+  return cover ? `<img src="${rAttr(cover)}" alt="${rAttr(`Cover of ${title}`)}" width="${width}">` : '';
 }
-function plural(n, one, many) { return `${n} ${n === 1 ? one : (many || `${one}s`)}`; }
-function barOf(n, max, width) { return n ? '█'.repeat(Math.max(1, Math.round((n / max) * width))) : ''; }
+function rPlural(n, one, many) { return `${n} ${n === 1 ? one : (many || `${one}s`)}`; }
+function rNum(n) { return typeof n === 'number' ? n.toLocaleString('en-US') : String(n == null ? '' : n); }
+function rOneLine(s) { return String(s || '').replace(/\s*\n+\s*/g, ' ').trim(); }
+function rDate(d) {
+  if (!/^\d{4}-\d\d-\d\d$/.test(d || '')) return d || '';
+  const [y, m, day] = d.split('-').map(Number);
+  return new Date(y, m - 1, day).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+/** Count values → [{ name, count }] sorted by count, then name. */
+function rRank(values) {
+  const m = new Map();
+  for (const v of values) {
+    if (v == null || v === '') continue;
+    const key = String(v).toLowerCase();
+    if (!m.has(key)) m.set(key, { name: String(v), count: 0 });
+    m.get(key).count++;
+  }
+  return [...m.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+}
+
+/** The "Most read" row for one dimension: ties share the top spot. */
+function rTop(label, ranked, of) {
+  if (!ranked.length) return null;
+  const best = ranked.filter((x) => x.count === ranked[0].count);
+  if ((ranked[0].count < 2 && of > 1) || best.length > 3) return null; // no clear favorite
+  return { label, name: best.map((x) => x.name).join(', '), count: ranked[0].count, of };
+}
+
+function rMonthCounts(dates) {
+  const out = new Array(12).fill(0);
+  for (const d of dates) { const m = /^\d{4}-(\d\d)/.exec(d || ''); if (m) out[Number(m[1]) - 1]++; }
+  return out;
+}
+
+function newReport(source, year, title) {
+  return {
+    schema: REPORT_SCHEMA, source, year: String(year), generated: (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; })(),
+    title, covers: [], stats: [], top: [], highlights: [], months: null, sections: [], tables: [],
+  };
+}
+
+function renderReportMarkdown(r) {
+  const out = [`# ${r.title}`, '', `*Made ${rDate(r.generated)} from ${r.source.name}.*`, ''];
+  const itemCount = r.sections.reduce((n, s) => n + s.items.length, 0);
+  if (!itemCount && !r.stats.length) { out.push(`Nothing logged in ${r.year}.`, ''); return out.join('\n'); }
+  const covers = r.covers.filter((c) => c.cover);
+  if (covers.length) out.push(covers.map((c) => rImg(c.title, c.cover, 72)).join(' '), '');
+
+  if (r.stats.length) {
+    out.push('## At a glance', '', '| | |', '| --- | --- |', ...r.stats.map((s) => `| ${rMd(s.label)} | ${rNum(s.value)} |`), '');
+  }
+  const top = r.top.filter(Boolean);
+  if (top.length) {
+    out.push(`## ${r.topHeading || 'Most read'}`, '', `| | Top | ${r.source.units[0].toUpperCase()}${r.source.units.slice(1)} |`, '| --- | --- | --- |',
+      ...top.map((t) => `| ${rMd(t.label)} | ${rMd(t.name)} | ${t.count} of ${t.of} |`), '');
+  }
+  if (r.highlights.length) out.push('## Highlights', '', ...r.highlights.map((h) => `- ${h}`), '');
+
+  if (r.months && r.months.values.some(Boolean)) {
+    const v = r.months.values, sec = r.months.secondary;
+    const max = Math.max(...v);
+    out.push('## Month by month', '', '```');
+    REPORT_MONTHS.forEach((m, i) => {
+      const bar = v[i] ? '█'.repeat(Math.max(1, Math.round((v[i] / max) * 24))) : '';
+      const extra = sec && sec.values[i] ? `  ${rNum(sec.values[i])} ${sec.label}` : '';
+      out.push(`${m.slice(0, 3)}  ${bar.padEnd(25)}${v[i] || ''}${extra}`.trimEnd());
+    });
+    out.push('```', `*${r.months.label}${sec ? `, with ${sec.label}` : ''}.*`, '');
+  }
+
+  for (const s of r.sections) {
+    if (!s.items.length) continue;
+    out.push(`## ${s.heading}`, '');
+    for (const it of s.items) {
+      out.push(`### ${rMd(it.title)}`, '');
+      if (it.cover) out.push(rImg(it.title, it.cover, 120), '');
+      const meta = [...(it.author ? [`*${rMd(it.author)}*`] : []), ...(it.meta || [])];
+      if (it.link) meta.push(`[${it.linkLabel || 'Link'}](${it.link})`);
+      if (meta.length) out.push(meta.join(' · '), '');
+      for (const f of it.fields || []) if (f.text) out.push(`**${f.label}:** ${rOneLine(f.text)}`, '');
+      if (it.checklist && it.checklist.length) out.push(...it.checklist.map((c) => `- [${c.done ? 'x' : ' '}] ${c.text}`), '');
+      if (it.quote) out.push(String(it.quote).trim().split('\n').map((l) => (l ? `> ${l}` : '>')).join('\n'), '');
+    }
+  }
+  for (const t of r.tables) {
+    if (!t.rows.length) continue;
+    out.push(`## ${t.heading}`, '', `| ${t.columns.join(' | ')} |`, `| ${t.columns.map(() => '---').join(' | ')} |`,
+      ...t.rows.map((row) => `| ${row.map((c) => rMd(rNum(c))).join(' | ')} |`), '');
+  }
+  return out.join('\n');
+}
+/* --- end report core --- */
+
 
 /** Lines like "- 2026-03-02 · Finished. Loved it." from a note's Reading log → { date: text }. */
 function readingLogThoughts(content) {
@@ -606,94 +721,74 @@ function readingLogThoughts(content) {
 }
 
 /**
- * Year-end report: every book read that year with its cover, and a look at how
- * the year went: formats, shelves vs. elsewhere, genres, authors, rereads.
+ * Year-end report data (year-in-reading/1): every book read in the year, with formats,
+ * shelves vs. elsewhere, genres, topics, authors and rereads.
  */
-function exportYear(books, year, thoughts) {
+function buildYearReport(books, year, thoughts) {
   thoughts = thoughts || {};
   const y = String(year);
   const entries = [];
   for (const b of books) for (const d of b.read) if (d.startsWith(y)) entries.push({ d, b });
   const sortDate = (d) => (/^\d{4}$/.test(d) ? `${d}-99` : d); // year-only reads go last
   entries.sort((x, z) => sortDate(x.d).localeCompare(sortDate(z.d)) || byTitle(x.b, z.b));
-  const out = [`# ${y} in reading`, '', `*Made ${niceDate(todayStr())} from The Stacks.*`, ''];
-  if (!entries.length) { out.push(`No books marked read in ${y}.`, ''); return out.join('\n'); }
+  const r = newReport({ plugin: 'the-stacks', name: 'The Stacks', unit: 'book', units: 'books' }, y, `${y} in reading`);
+  if (!entries.length) return r;
   const read = [...new Set(entries.map((e) => e.b))];
 
-  const covers = read.filter((b) => b.cover);
-  if (covers.length) out.push(covers.map((b) => coverImg(b, 72)).join(' '), '');
-
-  // At a glance
+  r.covers = read.filter((b) => b.cover).map((b) => ({ title: b.title, cover: b.cover }));
   const owned = read.filter((b) => b.owned).length;
   // A reread is any read this year that was not the first time you read the book.
   const rereads = read.filter((b) => b.read.some((d, i) => i > 0 && d.startsWith(y)));
-  out.push('## At a glance', '', '| | |', '| --- | --- |', `| Books read | ${read.length} |`);
-  if (entries.length !== read.length) out.push(`| Reads, counting rereads | ${entries.length} |`);
-  if (owned !== read.length) out.push(`| From my shelves | ${owned} |`, `| Read elsewhere | ${read.length - owned} |`);
-  if (rereads.length) out.push(`| Rereads | ${rereads.length} |`);
-  out.push('');
+  r.stats.push({ label: 'Books read', value: read.length });
+  if (entries.length !== read.length) r.stats.push({ label: 'Reads, counting rereads', value: entries.length });
+  if (owned !== read.length) r.stats.push({ label: 'From my shelves', value: owned }, { label: 'Read elsewhere', value: read.length - owned });
+  if (rereads.length) r.stats.push({ label: 'Rereads', value: rereads.length });
 
-  // Most read
-  const ranked = (dim, pool) => tally(pool || read, dim).filter((x) => !/^No /.test(x.value)).sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
-  const top = (list) => {
-    if (!list.length) return null;
-    const best = list.filter((x) => x.count === list[0].count);
-    return { name: best.map((x) => x.value).join(', '), count: list[0].count, of: list.length };
-  };
-  const decades = new Map();
-  for (const b of read) if (/^\d{4}$/.test(b.year)) { const d = `${b.year.slice(0, 3)}0s`; decades.set(d, (decades.get(d) || 0) + 1); }
-  const decadeList = [...decades].map(([value, count]) => ({ value, count })).sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
-  const formats = ranked('format'), genres = ranked('genre'), topics = ranked('topic'), authors = ranked('author');
-  const sources = tally(read.filter((b) => !b.owned && b.source), 'source').sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
-  const rows = [['Format', top(formats)], ['Genre', top(genres)], ['Topic', top(topics)], ['Author', top(authors)],
-    ['Where from', top(sources)], ['Decade published', top(decadeList)]].filter(([, t]) => t);
-  if (rows.length) {
-    out.push('## Most read', '', '| | Top | Books |', '| --- | --- | --- |',
-      ...rows.map(([label, t]) => `| ${label} | ${md(t.name)} | ${t.count} of ${read.length} |`), '');
-  }
+  const formats = rRank(read.map((b) => b.format));
+  const genres = rRank(read.flatMap((b) => b.genres));
+  const topics = rRank(read.flatMap((b) => b.topics));
+  const authors = rRank(read.flatMap((b) => splitAuthors(b.author)));
+  const sources = rRank(read.filter((b) => !b.owned).map((b) => b.source));
+  const decades = rRank(read.filter((b) => /^\d{4}$/.test(b.year)).map((b) => `${b.year.slice(0, 3)}0s`));
+  r.top = [rTop('Format', formats, read.length), rTop('Genre', genres, read.length), rTop('Topic', topics, read.length),
+    rTop('Author', authors, read.length), rTop('Where from', sources, read.length), rTop('Decade published', decades, read.length)].filter(Boolean);
 
-  // Highlights
-  const hi = [];
-  const months = MONTH_NAMES.map((_, i) => entries.filter((e) => e.d.slice(5, 7) === String(i + 1).padStart(2, '0')).length);
+  const hi = r.highlights;
+  const months = rMonthCounts(entries.map((e) => e.d));
   const peak = Math.max(...months);
-  if (peak > 1) hi.push(`**Busiest month:** ${MONTH_NAMES.filter((_, i) => months[i] === peak).join(' and ')}, with ${plural(peak, 'book')}.`);
-  if (genres.length > 2) hi.push(`**Range:** ${genres.length} genres and ${plural(authors.length, 'author')}.`);
+  if (peak > 1) hi.push(`**Busiest month:** ${REPORT_MONTHS.filter((_, i) => months[i] === peak).join(' and ')}, with ${rPlural(peak, 'book')}.`);
+  if (genres.length > 2) hi.push(`**Range:** ${genres.length} genres and ${rPlural(authors.length, 'author')}.`);
   const priorAuthors = new Set(books.filter((b) => b.read.some((d) => d < y)).flatMap((b) => splitAuthors(b.author).map((a) => a.toLowerCase())));
   const newAuthors = [...new Set(read.flatMap((b) => splitAuthors(b.author)))].filter((a) => !priorAuthors.has(a.toLowerCase()));
-  if (priorAuthors.size && newAuthors.length) hi.push(`**New to me:** ${plural(newAuthors.length, 'author')} I hadn't logged reading before.`);
+  if (priorAuthors.size && newAuthors.length) hi.push(`**New to me:** ${rPlural(newAuthors.length, 'author')} I hadn't logged reading before.`);
   const dated = read.filter((b) => /^\d{4}$/.test(b.year)).sort((a, b) => a.year.localeCompare(b.year));
-  if (dated.length > 1) hi.push(`**Oldest and newest:** *${md(dated[0].title)}* (${dated[0].year}) and *${md(dated[dated.length - 1].title)}* (${dated[dated.length - 1].year}).`);
-  if (rereads.length) hi.push(`**Back again:** ${rereads.map((b) => `*${md(b.title)}*${b.read.length > 2 ? ` (${plural(b.read.length, 'read')} in all)` : ''}`).join(', ')}.`);
+  if (dated.length > 1) hi.push(`**Oldest and newest:** *${rMd(dated[0].title)}* (${dated[0].year}) and *${rMd(dated[dated.length - 1].title)}* (${dated[dated.length - 1].year}).`);
+  if (rereads.length) hi.push(`**Back again:** ${rereads.map((b) => `*${rMd(b.title)}*${b.read.length > 2 ? ` (${rPlural(b.read.length, 'read')} in all)` : ''}`).join(', ')}.`);
   const shelfTotal = books.filter((b) => b.owned).length;
   const shelfUnread = books.filter((b) => b.owned && !b.read.length && b.status !== 'read').length;
   if (shelfTotal && owned) hi.push(`**The shelves:** ${owned} read from home this year. ${fmtNum(shelfUnread)} of ${fmtNum(shelfTotal)} books on the shelves ${shelfUnread === 1 ? 'is' : 'are'} still unread.`);
-  if (hi.length) out.push('## Highlights', '', ...hi.map((h) => `- ${h}`), '');
 
-  out.push('## Month by month', '', '```');
-  MONTH_NAMES.forEach((m, i) => out.push(`${m.slice(0, 3)}  ${barOf(months[i], peak, 24).padEnd(25)}${months[i] || ''}`));
-  out.push('```', '');
-
-  // The books, by month
-  out.push('## The books', '');
-  let lastMonth = '';
+  r.months = { label: 'Books read', values: months, secondary: null };
+  const groups = new Map();
   for (const { d, b } of entries) {
-    const mo = /^\d{4}$/.test(d) ? 'Sometime this year' : MONTH_NAMES[Number(d.slice(5, 7)) - 1];
-    if (mo !== lastMonth) { out.push(`### ${mo}`, ''); lastMonth = mo; }
-    const meta = [b.author && `*${md(b.author)}*`, b.format, !b.owned && (b.source ? `via ${b.source}` : 'not owned'),
-      b.genres.join(', '), /^\d{4}-\d\d-\d\d$/.test(d) && shortDate(d), b.read.length > 1 && `read ${b.read.length} times`].filter(Boolean);
-    const lines = [];
-    if (b.cover) lines.push(`${coverImg(b, 90)}`, '');
-    lines.push(`**${md(b.title)}**  `, meta.join(' · '));
-    const note = (thoughts[b.path] || {})[d];
-    if (note) lines.push('', `> ${note}`);
-    out.push(...lines, '');
+    const heading = /^\d{4}$/.test(d) ? 'Sometime this year' : REPORT_MONTHS[Number(d.slice(5, 7)) - 1];
+    if (!groups.has(heading)) groups.set(heading, []);
+    groups.get(heading).push({
+      title: b.title, author: b.author, cover: b.cover, date: d, link: b.link, linkLabel: b.link ? 'Link' : '',
+      meta: [b.format, !b.owned && (b.source ? `via ${b.source}` : 'not owned'), b.genres.join(', '),
+        /^\d{4}-\d\d-\d\d$/.test(d) && rDate(d), b.read.length > 1 && `read ${b.read.length} times`].filter(Boolean),
+      fields: [], quote: (thoughts[b.path] || {})[d] || '',
+      tags: [b.format, ...b.genres, ...b.topics, ...(b.owned ? [] : ['Read elsewhere'])].filter(Boolean),
+    });
   }
-
+  r.sections = [...groups].map(([heading, items]) => ({ heading, items }));
   for (const [label, list] of [['Format', formats], ['Genre', genres], ['Topic', topics]]) {
-    if (list.length > 1) out.push(`## By ${label.toLowerCase()}`, '', `| ${label} | Books |`, '| --- | --- |', ...list.map((g) => `| ${md(g.value)} | ${g.count} |`), '');
+    if (list.length > 1) r.tables.push({ heading: `By ${label.toLowerCase()}`, columns: [label, 'Books'], rows: list.map((g) => [g.name, g.count]) });
   }
-  return out.join('\n');
+  return r;
 }
+
+function exportYear(books, year, thoughts) { return renderReportMarkdown(buildYearReport(books, year, thoughts)); }
 
 /* ------------------------------------------------------------------ */
 /* Plugin                                                             */
@@ -913,7 +1008,9 @@ class StacksPlugin extends Plugin {
     const books = this.getBooks();
     const thoughts = {};
     for (const b of books) if (b.read.some((d) => d.startsWith(year))) thoughts[b.path] = readingLogThoughts(await this.app.vault.cachedRead(b.file));
-    const f = await this.writeFile(`${this.settings.exportsFolder}/${year} in reading.md`, exportYear(books, year, thoughts));
+    const report = buildYearReport(books, year, thoughts);
+    const f = await this.writeFile(`${this.settings.exportsFolder}/${year} in reading.md`, renderReportMarkdown(report));
+    await this.writeFile(`${this.settings.exportsFolder}/${year} in reading.json`, JSON.stringify(report, null, 2));
     this.openFile(f);
   }
 
@@ -1991,5 +2088,5 @@ module.exports.default = StacksPlugin;
 module.exports.helpers = {
   todayStr, toDateStr, toList, normStatus, truthy, splitAuthors, foldText, titleKey, surnameKey, dupKey, cleanIsbn,
   cleanNote, bookFromFrontmatter, buildBookNote, parseCsv, parseMarkdown, parseImport, parseListItem, guessTarget, rowsToBooks,
-  readingLogThoughts, planImport, findDuplicateGroups, tally, matchesFilter, exportCsv, exportYear, DIMENSIONS, DEFAULT_SETTINGS,
+  readingLogThoughts, buildYearReport, renderReportMarkdown, planImport, findDuplicateGroups, tally, matchesFilter, exportCsv, exportYear, DIMENSIONS, DEFAULT_SETTINGS,
 };
